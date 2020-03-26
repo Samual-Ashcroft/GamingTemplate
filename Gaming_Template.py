@@ -1,14 +1,12 @@
-import sys
-import ctypes
-import copy
-
-import orion5
-from orion5.utils.general import *
-from orion5.orion5_math import *
 
 from pyglet.gl import *
 from pyglet.window import key
 from pyglet.gl import GLfloat
+from os import listdir
+from os.path import isfile, join
+import time
+import struct
+import random
 
 print('KEYBOARD CONTROLS:',
       '\n   W,A,S,D - Directions',
@@ -18,296 +16,169 @@ print('KEYBOARD CONTROLS:',
 
 ZONEWIDTH = 25
 WindowProps = [800, 600]
-WINDOW   = [WindowProps[0] + 4 * ZONEWIDTH, WindowProps[1] + 2 * ZONEWIDTH]
+WINDOW   = WindowProps
 INCREMENT = 5
 CONTROLZPOSITION = -100
 CONTROLSCALER = 0.097
 CONTROLSIZE = ZONEWIDTH*CONTROLSCALER
-
-seeder = [
-    {
-        'Trans': {'x': 0, 'y': -700, 'z': 0},
-        'Rot': {'x': 0, 'y': 0, 'z': 180}
-    }
-]
-
-arm = {
-    'id': 0,
-    'coms': ['COM8'],
-    'arms': [
-        {
-            'arm': None,
-            'Trans': {'x': 0, 'y': 0, 'z': 0},
-            'Rot': {'x': 0, 'y': 0, 'z': 0}
-        }
-    ]
-}
-
-ORION5 = None
-SEQUENCEFOLDER = './sequences/'
-SEQUENCEBASENAME = 'Sequence'
-SEQUENCEEXTENSION = '.txt'
 ZSCALER = 10
+
+def wrap180(theta):
+    while True:
+        if theta > 180:
+            theta -= 360
+        elif theta < -180:
+            theta += 360
+        else:
+            break
+    return theta
+
+def contain(value, upper, lower):
+    if value > upper:
+        return upper
+    elif value < lower:
+        return lower
+    return value
+
+def STLRead(Models, fileName, ModelID, ColorID = 1, scaler = 1):
+    filePipe = open(fileName, 'rb')
+    colorcodes = [[.16, .16, .16, 1.0], [.12, .12, .12, 1.0], [.5, 0, 0, 0.1], [.38, .37, .4, 1],[.35, .2, .53, 1]]
+    headerLength = 80
+    floatLength = 4
+    endLength = 2
+    header = filePipe.read(headerLength)
+    facetNo = struct.unpack('I', filePipe.read(4))[0]
+    Models.append( [[ModelID, colorcodes[ColorID]],[]] )
+    for data in range(facetNo):
+        try:
+            Normal = [struct.unpack('f', filePipe.read(floatLength))[0],
+                    struct.unpack('f', filePipe.read(floatLength))[0],
+                    struct.unpack('f', filePipe.read(floatLength))[0]]
+            Vertex1 = [struct.unpack('f', filePipe.read(floatLength))[0]*scaler,
+                    struct.unpack('f', filePipe.read(floatLength))[0]*scaler,
+                    struct.unpack('f', filePipe.read(floatLength))[0]*scaler]
+            Vertex2 = [struct.unpack('f', filePipe.read(floatLength))[0]*scaler,
+                    struct.unpack('f', filePipe.read(floatLength))[0]*scaler,
+                    struct.unpack('f', filePipe.read(floatLength))[0]*scaler]
+            Vertex3 = [struct.unpack('f', filePipe.read(floatLength))[0]*scaler,
+                    struct.unpack('f', filePipe.read(floatLength))[0]*scaler,
+                    struct.unpack('f', filePipe.read(floatLength))[0]*scaler]
+            filePipe.read(endLength)
+            Models[-1][1].append([Normal, Vertex1, Vertex2, Vertex3])
+        except:
+            print("error reading facets")
+            break
+    filePipe.close()
+    return Models
+
+def PopulateModels(fileSets, scaler = 1):
+    Models = []
+    for iterator1 in range(len(fileSets)):
+        for iterator2 in range(len(fileSets[iterator1])):
+            try:
+                Models = STLRead(Models, fileSets[iterator1][iterator2], iterator1, int(fileSets[iterator1][iterator2][11:14]), scaler)
+            except:
+                Models = STLRead(Models, fileSets[iterator1][iterator2], iterator1, 1, scaler)
+    return Models
+
+def PullFileNames(extension, subFolder):
+    ''' Pulls a list of STL files in, provided they start
+    with a number 000 up to 010'''
+    fileNames = [f for f in listdir(subFolder) if isfile(join(subFolder, f))]
+    iterator = 0
+    while iterator < len(fileNames):
+        if fileNames[iterator].find(extension) == -1:
+            del fileNames[iterator]
+        else:
+            iterator +=1
+    fileSets = [[], [], [], [], [], [], [], [], [], [], []]
+    for iterator1 in range(len(fileNames)):
+        fileSets[int(fileNames[iterator1][:3])].append(subFolder+'/'+fileNames[iterator1])
+    return fileSets
 
 def vec(*args):
     return (GLfloat * len(args))(*args)
 
-class Window(pyglet.window.Window):
-    _Widgets = {
-        'Selected': None,
-        'Widgets': []
-    }
+class Entity:
+    def __init__(self, stlID, x, y, z=0, xr=0, yr=0, zr=0, dx=0, dy=0, dz=0, dxr=0, dyr=0, dzr=0):
+        self._stlID = stlID
+        self.x = x
+        self.y = y
+        self.z = z
+        self.xr = xr
+        self.yr = yr
+        self.zr = zr
+        self.dx = dx
+        self.dy = dy
+        self.dz = dz
+        self.dxr = dxr
+        self.dyr = dyr
+        self.dzr = dzr
 
-    _windowConstants = [
-        50, -100*ZSCALER, 0.097, None,
-        [
-            ['Claw', 'Attack Angle', 'X', 'Y', 'Attack Depth', 'Turret'],
-            None,
-            [
-                [0, 0, True, key.MOTION_END_OF_LINE, key.MOTION_NEXT_PAGE],
-                [0, 0, True, key.MOTION_PREVIOUS_PAGE, key.MOTION_BEGINNING_OF_LINE],
-                [0, 0, False, key.MOTION_LEFT, key.MOTION_RIGHT],
-                [0, 0, True, key.MOTION_UP, key.MOTION_DOWN],
-                [0, 0, True, key.MOTION_BACKSPACE, key.MOTION_DELETE],
-                [0, 0, False, key.MOTION_PREVIOUS_WORD, key.MOTION_NEXT_WORD]
-            ]
-        ]
-    ] 
+    def spin(self, dxr=0, dyr=0, dzr=0):
+        self.dxr = dxr
+        self.dyr = dyr
+        self.dzr = dzr
+
+    def move(self, dx, dy, dz):
+        self.dx = dx
+        self.dy = dy
+        self.dz = dz
+    
+    def iterate(self):
+        self.x += self.dx
+        self.y += self.dy
+        self.z += self.dz
+        self.xr = wrap180(self.xr + self.dxr)
+        self.yr = wrap180(self.yr + self.dyr)
+        self.zr = wrap180(self.zr + self.dzr)
+
+class EntityGroup:
+    def __init__(self, stlID, x, y, z=0, spacing = 15, xNo=range(0,1,1), yNo=range(0,1,1), zNo=range(0,1,1)):
+        self._container = []
+        self._stlID = stlID
+        self.x = x
+        self.y = y
+        self.z = z
+        for _xNo in xNo:
+            for _yNo in yNo:
+                for _zNo in zNo:
+                    self._container.append(Entity(stlID, x+spacing*_xNo, y+spacing*_yNo, z+spacing*_zNo))
+
+class Window(pyglet.window.Window):
 
     _mouseInfo = {'x':None, 'y':None, 'dx':None, 'dy':None, 
                 'scroll_x':None, 'scroll_y':None, 
                 'button':None, 'modifiers':None, 'widget':None}
-    _cameraInfo = {'offset':{'x':160, 'y':-100, 'z':-300*ZSCALER}, 
-                    'rotation':{'x':-80, 'y':0, 'z':-150},
+    _cameraInfo = {'offset':{'x':0, 'y':-350, 'z':500*ZSCALER, 
+                        'min':{'x':-1, 'y':-355, 'z':495*ZSCALER}, 
+                        'max':{'x':1, 'y':-345, 'z':505*ZSCALER}}, 
+                    'rotation':{'x':-110, 'y':0, 'z':0, 
+                        'min':{'x':-115, 'y':-5, 'z':-5}, 
+                        'max':{'x':-105, 'y':5, 'z':5}}, 
                     'XYZscaler': ZSCALER}
-    _windowInfo = {}
+    _textOverlay = {'score':None, 'lives':None, 'zoom':- (100 + ((WindowProps[1]-650)*.153)) * ZSCALER}
 
-    _controlState = [-1, -1, -1, False, False, False, False, None, None, None, [0,0], None] #_controlState[11]
-
-    _armConstants = [
-        {'Shoulder': 1}, #(1+(52/28)
-        [
-            {
-                'Turret': 100.0,
-                'Shoulder': 100.0,
-                'Elbow': 100.0,
-                'Wrist': 100.0,
-                'Claw': 100.0
-            },
-            ['Turret', 'Shoulder', 'Elbow', 'Wrist', 'Claw']
-        ],
-        {
-            'X lims': [500.0, 1.0, -250.0, False],
-            'Z lims': [500.0, 1.0, -250.0, False],
-            'Attack Angle lims': [360.0, 1.0, 0.0, True],
-            'Attack Depth lims': [500.0, 1.0, -250.0, False],
-            'Claw lims': [250.0, 1.0, 20.0, False],
-            'Turret lims': [360.0, 1.0, 0.0, True],
-            'Shoulder lims': [360.0, 1.0, 0.0, True],
-            'Bicep lims': [360.0, 1.0, 0.0, True],
-            'Wrist lims': [360.0, 1.0, 0.0, True],
-            'Bicep Len': 170.384,
-            'Forearm Len': 136.307,
-            'Wrist 2 Claw': 85.25,
-            'Key IDs': [
-                [key.MOTION_END_OF_LINE, 'Claw', True],
-                [key.MOTION_NEXT_PAGE, 'Claw', False],
-                [key.MOTION_UP, 'Z', True],
-                [key.MOTION_DOWN, 'Z', False],
-                [key.MOTION_LEFT, 'X', True],
-                [key.MOTION_RIGHT, 'X', False],
-                [key.MOTION_PREVIOUS_WORD, 'Turret', True],
-                [key.MOTION_NEXT_WORD, 'Turret', False],
-                [key.MOTION_PREVIOUS_PAGE, 'Attack Angle', True],
-                [key.MOTION_BEGINNING_OF_LINE, 'Attack Angle', False],
-                [key.MOTION_BACKSPACE, 'Attack Depth', True],
-                [key.MOTION_DELETE, 'Attack Depth', False]
-            ]
-        }
-    ] #self._armConstants[2]
-
-    _armVARS = [
-        {
-            'X': 400.0,
-            'Z': 50.0,
-            'Attack Angle': 0.0,
-            'Attack Depth': 50.0,
-            'Wrist Pos': [0.0, 0.0, 0.0],
-            'Elbow Pos': [0.0, 0.0, 0.0],
-            'Shoulder Pos': [-30.309, 0.0, 53.0],
-            'Elbow Angle': 0.0,
-            'Turret': 180.0,
-            'Shoulder': 0.0,
-            'Elbow': 0.0,
-            'Wrist': 0.0,
-            'Claw': 200.0,
-            'OLD': {
-                'X': 400.0,
-                'Z': 50.0,
-                'Attack Angle': 0.0,
-                'Attack Depth': 50.0,
-                'Wrist Pos': [0.0, 0.0, 0.0],
-                'Elbow Pos': [0.0, 0.0, 0.0],
-                'Shoulder Pos': [-30.309, 0.0, 53.0],
-                'Elbow Angle': 0.0,
-                'Turret': 180.0,
-                'Shoulder': 0.0,
-                'Elbow': 0.0,
-                'Wrist': 0.0,
-                'Claw': 200.0,
-            },
-            'Iter': [
-                'X',
-                'Z',
-                'Attack Angle',
-                'Attack Depth',
-                'Wrist Pos',
-                'Elbow Pos',
-                'Shoulder Pos',
-                'Elbow Angle',
-                'Turret',
-                'Shoulder',
-                'Elbow',
-                'Wrist',
-                'Claw'
-            ]
-        }
-    ] #_armVARS[arm['id']]
-
-    _armObjects = [[], None, []] #_armObjects[2] #_armObjects
-    _sequence = [[[]], -1] #_sequence[1][0]
     _objects = [[], None, [], []]
 
     def __init__(self, width, height, title=''):
-        image = pyglet.image.load('./obj/logo_60x60.png')
-        shift = -6
-        self.thing = [
-            pyglet.text.Label(
-                'C\nL\nA\nW\n \nO\nP\nE\nN\nI\nN\nG',
-                font_name='ARIAL', font_size=15,
-                x=shift, y=0, align = 'center',
-                anchor_x='center', anchor_y='center',
-                multiline=True, width=1
-            ),
-            pyglet.text.Label(
-                'W\nR\nI\nS\nT\n \nA\nN\nG\nL\nE',
-                font_name='ARIAL', font_size=15,
-                x=shift, y=0, align = 'center',
-                anchor_x='center', anchor_y='center',
-                multiline=True, width=1
-            ),
-            pyglet.text.Label(
-                'TOOL RADIUS',
-                font_name='ARIAL', font_size=15,
-                x=shift, y=0, align = 'center',
+        self._textOverlay['score'] = pyglet.text.Label(
+                'Score: 000',
+                font_name='ARIAL', font_size=25,
+                x=-6, y=0, align = 'center',
                 anchor_x='center', anchor_y='center'
-            ),
-            pyglet.text.Label(
-                'T O O L\n \nH E I G H T',
-                font_name='ARIAL', font_size=15,
-                x=shift, y=0, align = 'center',
-                anchor_x='center', anchor_y='center',
-                multiline = True, width = 1
-            ),
-            pyglet.text.Label(
-                'T\nO\nO\nL\n \nD\nI\nS\nT\nA\nN\nC\nE',
-                font_name='ARIAL', font_size=15,
-                x=shift, y=0, align = 'center',
-                anchor_x='center', anchor_y='center',
-                multiline=True, width=1
-            ),
-            pyglet.text.Label(
-                'TURRET ANGLE',
-                font_name='ARIAL', font_size=15,
-                x=shift, y=0, align = 'center',
+            )
+        self._textOverlay['lives'] = pyglet.text.Label(
+                'Lives:                        ',
+                font_name='ARIAL', font_size=25,
+                x=-6, y=0, align = 'center',
                 anchor_x='center', anchor_y='center'
-            ),
-            pyglet.sprite.Sprite(image, x=0, y=0)
-        ]
+            )
 
-        global arm
-        pyglet.window.Window.__init__(self, width, height, title, resizable=True, style=pyglet.window.Window.WINDOW_STYLE_DEFAULT)
+        pyglet.window.Window.__init__(self, width, height, title, resizable=False, style=pyglet.window.Window.WINDOW_STYLE_DEFAULT)
 
-        self._controlState[8] = [WINDOW[0], WINDOW[1]]
-        self.set_minimum_size(self._controlState[8][0], self._controlState[8][1])
-        self._controlState[9] = [['Claw', [self._controlState[8][0] - self._windowConstants[0],
-                                           self._windowConstants[0],
-                                           self._controlState[8][0],
-                                           self._controlState[8][1]],
-                                  [0, 0]],
-                                 ['Attack Angle', [self._windowConstants[0],
-                                                   2 * self._windowConstants[0],
-                                                   2 * self._windowConstants[0],
-                                                   self._controlState[8][1]],
-                                  [0, 0]],
-                                 ['X', [0,
-                                        0,
-                                        self._controlState[8][0],
-                                        self._windowConstants[0]],
-                                  [0, 0]],
-                                 ['Y', [0,
-                                        self._windowConstants[0],
-                                        self._windowConstants[0],
-                                        self._controlState[8][1]],
-                                  [0, 0]],
-                                 ['Attack Depth', [self._controlState[8][0] - 2 * self._windowConstants[0],
-                                                   2 * self._windowConstants[0],
-                                                   self._controlState[8][0] - self._windowConstants[0],
-                                                   self._controlState[8][1]],
-                                  [0, 0]],
-                                 ['Turret', [self._windowConstants[0],
-                                             self._windowConstants[0],
-                                             self._controlState[8][0] - self._windowConstants[0],
-                                             2 * self._windowConstants[0]],
-                                  [0, 0]]]
-        self._controlState[11] = {'Claw':[(self._controlState[8][0]/2)-self._windowConstants[0]/2,
-                                          (self._windowConstants[0] - self._controlState[8][1] / 2) + self._windowConstants[0] / 2,
-                                          0,
-                                          abs((self._windowConstants[0] - self._controlState[8][1] / 2) + self._windowConstants[0]/2)*2 + self._windowConstants[0],
-                                          self._armConstants[2]['Claw lims'][2],
-                                          self._armConstants[2]['Claw lims'][0]-self._armConstants[2]['Claw lims'][2],
-                                          0],
-                                'Attack Angle':[(self._windowConstants[0]-self._controlState[8][0]/2)+self._windowConstants[0]/2,
-                                                (2 * self._windowConstants[0] - self._controlState[8][1] / 2) + self._windowConstants[0] / 2,
-                                                0,
-                                                abs((2 * self._windowConstants[0] - self._controlState[8][1] / 2) + self._windowConstants[0] / 2)*2 + 2 * self._windowConstants[0],
-                                                self._armConstants[2]['Attack Angle lims'][2],
-                                                self._armConstants[2]['Attack Angle lims'][0] - self._armConstants[2]['Attack Angle lims'][2],
-                                                'Attack Angle',
-                                                0.5],
-                                'X':[(-self._controlState[8][0]/2)+self._windowConstants[0]/2,
-                                     (-self._controlState[8][1]/2)+self._windowConstants[0]/2,
-                                     abs((-self._controlState[8][0]/2)+self._windowConstants[0]/2)*2,
-                                     0,
-                                     self._armConstants[2]['X lims'][2],
-                                     self._armConstants[2]['X lims'][0] - self._armConstants[2]['X lims'][2],
-                                     'X',
-                                     0],
-                                'Y':[(-self._controlState[8][0]/2)+self._windowConstants[0]/2,
-                                     (self._windowConstants[0] - self._controlState[8][1] / 2) + self._windowConstants[0] / 2,
-                                     0,
-                                     abs((self._windowConstants[0] - self._controlState[8][1] / 2) + self._windowConstants[0] / 2)*2 + self._windowConstants[0],
-                                     self._armConstants[2]['Z lims'][2],
-                                     self._armConstants[2]['Z lims'][0] - self._armConstants[2]['Z lims'][2],
-                                     'Z',
-                                     0],
-                                'Attack Depth':[(self._controlState[8][0]/2-self._windowConstants[0])-self._windowConstants[0]/2,
-                                                (2*self._windowConstants[0]-self._controlState[8][1] / 2) + self._windowConstants[0] / 2,
-                                                0,
-                                                abs((2*self._windowConstants[0]-self._controlState[8][1] / 2) + self._windowConstants[0] / 2)*2 + 2 * self._windowConstants[0],
-                                                self._armConstants[2]['Attack Depth lims'][2],
-                                                self._armConstants[2]['Attack Depth lims'][0] - self._armConstants[2]['Attack Depth lims'][2],
-                                                'Attack Depth',
-                                                0],
-                                'Turret':[(self._windowConstants[0]-self._controlState[8][0]/2)+self._windowConstants[0]/2,
-                                                (self._windowConstants[0]-self._controlState[8][1]/2)+self._windowConstants[0]/2,
-                                                abs((self._windowConstants[0] - self._controlState[8][0] / 2) + self._windowConstants[0] / 2) * 2,
-                                                0,
-                                                  self._armConstants[2]['Turret lims'][2],
-                                                  self._armConstants[2]['Turret lims'][0] - self._armConstants[2]['Turret lims'][2],
-                                                'Turret',
-                                                0]}
-        self._controlState[7] = self._windowConstants[0] * self._windowConstants[2]
+        self.set_minimum_size(WINDOW[0], WINDOW[1])
+
         glClearColor(0, 0, 0, 1)
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
@@ -317,74 +188,19 @@ class Window(pyglet.window.Window):
         factor = [.1,.5,.1]
         glLightfv(GL_LIGHT1, GL_SPECULAR, vec(1.0*factor[1],1.0*factor[1],1.0*factor[1],1.0*factor[1]))
         glEnable(GL_LIGHT1)
-        arm['arms'][arm['id']]['arm'] = orion5.Orion5('standalone', arm['coms'][arm['id']], useSimulator=False)
-        self.on_text_motion(False)
-        self._windowConstants[4][1] = pyglet.graphics.Batch()
-        div = 2.2
-        vertices = [
-            -self._controlState[7] / div, -self._controlState[7] / div, 0,
-            self._controlState[7] / div, -self._controlState[7] / div, 0,
-            -self._controlState[7] / div, self._controlState[7] / div, 0,
-            -self._controlState[7] / div, self._controlState[7] / div, 0,
-            self._controlState[7] / div, -self._controlState[7] / div, 0,
-            self._controlState[7] / div, self._controlState[7] / div, 0
-        ]
-        normals = [
-            0.0,0.0,1.0,
-            0.0,0.0,1.0,
-            0.0,0.0,1.0,
-            0.0,0.0,1.0,
-            0.0,0.0,1.0,
-            0.0,0.0,1.0
-        ]
-        indices = range(6)
-        self._windowConstants[4][1].add_indexed(len(vertices) // 3,
-                                      GL_TRIANGLES,
-                                      None,  # group,
-                                      indices,
-                                      ('v3f/static', vertices),
-                                      ('n3f/static', normals))
-        ModelSets = PolyRead('./obj/3dObjects.SAM', self._cameraInfo['XYZscaler'])
-        self._armObjects[1] = len(ModelSets)
-        for iterator1 in range(self._armObjects[1]):
-            self._armObjects[2].append(ModelSets[iterator1][0][0])
-            self._armObjects[0].append(
-                [
-                    pyglet.graphics.Batch(),
-                    [
-                        ModelSets[iterator1][0][1][0],
-                        ModelSets[iterator1][0][1][1],
-                        ModelSets[iterator1][0][1][2],
-                        ModelSets[iterator1][0][1][3]
-                    ]
-                ]
-            )
-
-            vertices = []
-            normals = []
-            for iterator2 in range(len(ModelSets[iterator1][1])):
-                for iterator3 in range(1, 4):
-                    vertices.extend(ModelSets[iterator1][1][iterator2][iterator3])
-                    normals.extend(ModelSets[iterator1][1][iterator2][0])
-
-            # Create a list of triangle indices.
-            indices = range(3 * len(ModelSets[iterator1][1]))  # [[3*i, 3*i+1, 3*i+2] for i in xrange(len(facets))]
-            self._armObjects[0][-1][0].add_indexed(
-                len(vertices) // 3,
-                GL_TRIANGLES,
-                None,  # group,
-                indices,
-                ('v3f/static', vertices),
-                ('n3f/static', normals)
-            )
 
         pyglet.clock.schedule_interval(self.update, 1 / 20.0)
-        Offsets = [[0.0, 0.0, 0.0], [200.0, 200.0, 200.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0],
+        Offsets = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0],
                    [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
-        Rotations = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0],
+        Rotations = [[0.0, 0.0, 0.0], [90.0, 10.0, 10.0], [90.0, 0.0, 0.0], [0.0, 90.0, 90.0], [0.0, 0.0, 0.0],
                      [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
-
-        ModelSets = PopulateModels(PullFileNames('stl', './obj/'), self._cameraInfo['XYZscaler'])
+        '''
+        000_004_solid_virus
+        001_002_Hearts
+        002_003_Tank
+        003_003_Bullet
+        '''
+        ModelSets = PopulateModels(PullFileNames('stl', './obj/'), self._cameraInfo['XYZscaler']*10/163)
         self._objects[1] = len(ModelSets)
         for iterator1 in range(self._objects[1]):
             self._objects[3].append(
@@ -401,7 +217,9 @@ class Window(pyglet.window.Window):
                     }
                 }
             )
+            #append the Object id
             self._objects[2].append(ModelSets[iterator1][0][0])
+            #append the Objects colour id
             self._objects[0].append(
                 [
                     pyglet.graphics.Batch(),
@@ -431,106 +249,22 @@ class Window(pyglet.window.Window):
                 ('v3f/static', vertices),
                 ('n3f/static', normals)
             )
-
-        for item1 in self._windowConstants[4][2]:
-            self.on_text_motion(item1[3])
-            self.on_text_motion(item1[4])
+        self._entities = {'hearts':None, 'tank':None, 'bullets':None}
+        self._entities['hearts'] = EntityGroup(1, 15, 0, -5, 10, range(-2, 3, 1))
+        self._entities['tank'] = EntityGroup(2, 0, 0, 10)
+        self._entities['tank']._container[0].timeout = 10
+        self._entities['bullets'] = EntityGroup(3, 0, 0, 20)
+        self._entities['bullets']._container[0].dzr = 5
+        self._entities['bullets']._container[0].dz = 5
+        '''for item1 in self._entities:
+            print(item1)
+            for item2 in self._entities[item1]._container:
+                print(item2._stlID, item2.x, item2.y, item2.z, item2.xr, item2.yr, item2.zr,
+                item2.dxr, item2.dyr, item2.dzr)'''
 
     def on_resize(self, width, height):
         # set the Viewport
         glViewport(0, 0, width, height)
-        self._controlState[8] = [width, height]
-        #self.set_size(width, height)
-        self._controlState[7] = self._windowConstants[0] * self._windowConstants[2]
-        self._controlState[9] = [['Claw', [self._controlState[8][0] - self._windowConstants[0],
-                                 self._windowConstants[0],
-                                 self._controlState[8][0],
-                                 self._controlState[8][1]],
-                        [0, 0]],  # Third Zone Second Left, Claw Open?
-                       ['Attack Angle', [self._windowConstants[0],
-                                         2 * self._windowConstants[0],
-                                         2 * self._windowConstants[0],
-                                         self._controlState[8][1]],
-                        [0, 0]],  # Fifth Zone Second from Right, Attack Angle
-                       ['X', [0,
-                              0,
-                              self._controlState[8][0],
-                              self._windowConstants[0]],
-                        [0, 0]],  # Second zone bottom, X Position
-                       ['Y', [0,
-                              self._windowConstants[0],
-                              self._windowConstants[0],
-                              self._controlState[8][1]],
-                        [0, 0]],  # First Zone Left, Y Position
-                       ['Attack Depth', [self._controlState[8][0] - 2 * self._windowConstants[0],
-                                         2 * self._windowConstants[0],
-                                         self._controlState[8][0] - self._windowConstants[0],
-                                         self._controlState[8][1]],
-                        [0, 0]],  # Sixth Zone Right, Attack Depth
-                       ['Turret', [self._windowConstants[0],
-                                   self._windowConstants[0],
-                                   self._controlState[8][0] - self._windowConstants[0],
-                                   2 * self._windowConstants[0]],
-                        [0, 0]]]  # Fourth Zone Second from Bottom, Turret Angle
-        self._controlState[11] = {'Claw': [(self._controlState[8][0] / 2) - self._windowConstants[0] / 2,
-                                      (self._windowConstants[0] - self._controlState[8][1] / 2) + self._windowConstants[0] / 2,
-                                      0,
-                                      abs((self._windowConstants[0] - self._controlState[8][
-                                          1] / 2) + self._windowConstants[0] / 2) * 2 + self._windowConstants[0],
-                                      self._armConstants[2]['Claw lims'][2],
-                                      self._armConstants[2]['Claw lims'][0] - self._armConstants[2]['Claw lims'][2],
-                                      'Claw',
-                                      0],
-                             'Attack Angle': [(self._windowConstants[0] - self._controlState[8][0] / 2) + self._windowConstants[0] / 2,
-                                              (2 * self._windowConstants[0] - self._controlState[8][1] / 2) + self._windowConstants[0] / 2,
-                                              0,
-                                              abs((2 * self._windowConstants[0] - self._controlState[8][
-                                                  1] / 2) + self._windowConstants[0] / 2) * 2 + 2 * self._windowConstants[0],
-                                              self._armConstants[2]['Attack Angle lims'][2],
-                                              self._armConstants[2]['Attack Angle lims'][0] - self._armConstants[2]['Attack Angle lims'][
-                                                  2],
-                                              'Attack Angle',
-                                              .5],
-                             'X': [(-self._controlState[8][0] / 2) + self._windowConstants[0] / 2,
-                                   (-self._controlState[8][1] / 2) + self._windowConstants[0] / 2,
-                                   abs((-self._controlState[8][0] / 2) + self._windowConstants[0] / 2) * 2,
-                                   0,
-                                   self._armConstants[2]['X lims'][2],
-                                   self._armConstants[2]['X lims'][0] - self._armConstants[2]['X lims'][2],
-                                   'X',
-                                   0],
-                             'Y': [(-self._controlState[8][0] / 2) + self._windowConstants[0] / 2,
-                                   (self._windowConstants[0] - self._controlState[8][1] / 2) + self._windowConstants[0] / 2,
-                                   0,
-                                   abs((self._windowConstants[0] - self._controlState[8][
-                                       1] / 2) + self._windowConstants[0] / 2) * 2 + self._windowConstants[0],
-                                   self._armConstants[2]['Z lims'][2],
-                                   self._armConstants[2]['Z lims'][0] - self._armConstants[2]['Z lims'][2],
-                                   'Z',
-                                   0],
-                             'Attack Depth': [(self._controlState[8][0] / 2 - self._windowConstants[0]) - self._windowConstants[0] / 2,
-                                              (2 * self._windowConstants[0] - self._controlState[8][1] / 2) + self._windowConstants[0] / 2,
-                                              0,
-                                              abs((2 * self._windowConstants[0] - self._controlState[8][
-                                                  1] / 2) + self._windowConstants[0] / 2) * 2 + 2 * self._windowConstants[0],
-                                              self._armConstants[2]['Attack Depth lims'][2],
-                                              self._armConstants[2]['Attack Depth lims'][0] - self._armConstants[2]['Attack Depth lims'][
-                                                  2],
-                                              'Attack Depth',
-                                              0],
-                             'Turret': [(self._windowConstants[0] - self._controlState[8][0] / 2) + self._windowConstants[0] / 2,
-                                        (self._windowConstants[0] - self._controlState[8][1] / 2) + self._windowConstants[0] / 2,
-                                        abs((self._windowConstants[0] - self._controlState[8][0] / 2) + self._windowConstants[0] / 2) * 2,
-                                        0,
-                                        self._armConstants[2]['Turret lims'][2],
-                                        self._armConstants[2]['Turret lims'][0] - self._armConstants[2]['Turret lims'][2],
-                                        'Turret',
-                                        0]}
-        smaller = width
-        if width > height:
-            smaller = height
-        self._windowConstants[1] = - (100 + ((smaller-650)*.153))
-
         # using Projection mode
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
@@ -540,161 +274,181 @@ class Window(pyglet.window.Window):
         glLoadIdentity()
         glTranslatef(0, 0, -500)
 
-    def on_mouse_motion(x, y, dx, dy):
-        #_mouseInfo = {'x':None, 'y':None, 'dx':None, 'dy':None, 'scroll_x':None, 'scroll_y':None, 'button':None, 'modifiers':None}
-        pass
+    def on_mouse_motion(self, x, y, dx, dy):
+        
+        self._entities['tank']._container[0].x = contain(x*120/800-60, 50, -50)
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
-        #_mouseInfo = {'x':None, 'y':None, 'dx':None, 'dy':None, 'scroll_x':None, 'scroll_y':None, 'button':None, 'modifiers':None}
-        self._cameraInfo['offset']['z'] += scroll_y*50*self._cameraInfo['XYZscaler']
+        '''self._cameraInfo['offset']['z'] += scroll_y*50*self._cameraInfo['XYZscaler']
+        if self._cameraInfo['offset']['min']['z'] > self._cameraInfo['offset']['z']:
+            self._cameraInfo['offset']['z'] = self._cameraInfo['offset']['min']['z'] + 0
+        if self._cameraInfo['offset']['max']['z'] < self._cameraInfo['offset']['z']:
+            self._cameraInfo['offset']['z'] = self._cameraInfo['offset']['max']['z'] + 0'''
+        pass
 
     def on_mouse_press(self, x, y, button, modifiers):
-        #_mouseInfo = {'x':None, 'y':None, 'dx':None, 'dy':None, 'scroll_x':None, 'scroll_y':None, 'button':None, 'modifiers':None}
-        self._controlState[0] = button
-        self._mouseInfo['modifiers'] = modifiers
-        self._controlState[1] = 0#iterator1
-        for iterator1 in range(len(self._controlState[9])):
-            if ((abs((x - self._controlState[8][0] / 2) * self._windowConstants[2] - self._windowConstants[4][2][iterator1][0]) < (self._windowConstants[0] / 2)*self._windowConstants[2])
-                and (abs((y - self._controlState[8][1] / 2) * self._windowConstants[2] - self._windowConstants[4][2][iterator1][1]) < (self._windowConstants[0] / 2)*self._windowConstants[2])):
-                self._controlState[1] = iterator1 + 1
+        if self._entities['tank']._container[0].timeout == 0:
+            self._entities['bullets']._container.append(Entity(3, 
+                self._entities['tank']._container[0].x + 0,
+                self._entities['tank']._container[0].y + 0,
+                20, 0, 0, 1, 0, 0, 1))
+            self._entities['tank']._container[0].timeout = 10
 
     def on_mouse_release(self, x, y, button, modifiers):
-        #_mouseInfo = {'x':None, 'y':None, 'dx':None, 'dy':None, 'scroll_x':None, 'scroll_y':None, 'button':None, 'modifiers':None}
-        self._controlState[0] = -1
-        self._controlState[1] = -1
-        self._mouseInfo['modifiers'] = -1
+        pass
     
     def on_mouse_drag(self, x, y, dx, dy, buttons, modifiers):
-        if (buttons == 1
-            and self._controlState[1] == 0):
+        """if buttons == 1:
             self._cameraInfo['rotation']['x'] -= dy * 0.25
-            if modifiers == 0: #self._mouseInfo['modifiers'] == 0:
+            if modifiers == 0:
                 self._cameraInfo['rotation']['y'] += dx * 0.25
             else:
                 self._cameraInfo['rotation']['z'] += dx * 0.25
-        if (buttons == 4
-            and self._controlState[1] == 0):
+            ''' This is spagetti a little hmm...   has to be a more modular way to do this I think with OOP perhaps '''
+            if self._cameraInfo['rotation']['min']['x'] > self._cameraInfo['rotation']['x']:
+                self._cameraInfo['rotation']['x'] = self._cameraInfo['rotation']['min']['x'] + 0
+            if self._cameraInfo['rotation']['max']['x'] < self._cameraInfo['rotation']['x']:
+                self._cameraInfo['rotation']['x'] = self._cameraInfo['rotation']['max']['x'] + 0
+            if self._cameraInfo['rotation']['min']['y'] > self._cameraInfo['rotation']['y']:
+                self._cameraInfo['rotation']['y'] = self._cameraInfo['rotation']['min']['y'] + 0
+            if self._cameraInfo['rotation']['max']['y'] < self._cameraInfo['rotation']['y']:
+                self._cameraInfo['rotation']['y'] = self._cameraInfo['rotation']['max']['y'] + 0
+            if self._cameraInfo['rotation']['min']['z'] > self._cameraInfo['rotation']['z']:
+                self._cameraInfo['rotation']['z'] = self._cameraInfo['rotation']['min']['z'] + 0
+            if self._cameraInfo['rotation']['max']['z'] < self._cameraInfo['rotation']['z']:
+                self._cameraInfo['rotation']['z'] = self._cameraInfo['rotation']['max']['z'] + 0
+        elif buttons == 4:
             self._cameraInfo['offset']['x'] += dx * 1.5 *self._cameraInfo['XYZscaler']
             self._cameraInfo['offset']['y'] += dy * 1.5 *self._cameraInfo['XYZscaler']
-        if self._controlState[1] > 0:
-            if self._windowConstants[4][2][self._controlState[1] - 1][2]:
-                thepercent = (((y - self._controlState[9][self._controlState[1] - 1][1][1]
-                                +(self._windowConstants[0]/2)-25)
-                               / (self._controlState[9][self._controlState[1] - 1][1][3] - self._controlState[9][self._controlState[1] - 1][1][1]))
-                              +  self._controlState[11][self._windowConstants[4][0][self._controlState[1] - 1]][7])
-            else:
-                thepercent = (((x - self._controlState[9][self._controlState[1] - 1][1][0] + (self._windowConstants[0] / 2))
-                              / (self._controlState[9][self._controlState[1] - 1][1][2] - self._controlState[9][self._controlState[1] - 1][1][0]))
-                              + self._controlState[11][self._windowConstants[4][0][self._controlState[1] - 1]][7])
-            if ((self._controlState[11][self._windowConstants[4][0][self._controlState[1] - 1]][7] != 0) and (thepercent > 1)):
-                thepercent -= 1
-            self.on_text_motion(self._windowConstants[4][2][self._controlState[1] - 1][3], False,
-                                (self._controlState[11][self._windowConstants[4][0][self._controlState[1] - 1]][5]
-                                 * thepercent
-                                 + self._controlState[11][self._windowConstants[4][0][self._controlState[1] - 1]][4])
-                                )
+            ''' This is spagetti a little hmm...   has to be a more modular way to do this I think with OOP perhaps '''
+            if self._cameraInfo['offset']['min']['x'] > self._cameraInfo['offset']['x']:
+                self._cameraInfo['offset']['x'] = self._cameraInfo['offset']['min']['x'] + 0
+            if self._cameraInfo['offset']['max']['x'] < self._cameraInfo['offset']['x']:
+                self._cameraInfo['offset']['x'] = self._cameraInfo['offset']['max']['x'] + 0
+            if self._cameraInfo['offset']['min']['y'] > self._cameraInfo['offset']['y']:
+                self._cameraInfo['offset']['y'] = self._cameraInfo['offset']['min']['y'] + 0
+            if self._cameraInfo['offset']['max']['y'] < self._cameraInfo['offset']['y']:
+                self._cameraInfo['offset']['y'] = self._cameraInfo['offset']['max']['y'] + 0"""
+        pass
 
     def on_key_press(self, symbol, modifiers):
+        increaser = 1
         if symbol == key.ESCAPE:
-            self._controlState = [-1, -1, -1, False, False, False, False]
-            arm['arms'][arm['id']]['arm'].releaseTorque()
             pyglet.app.exit()
-        print('yolo')
+        elif symbol == key.A:
+            self._entities['tank']._container[0].dx -= 1
+        elif symbol == key.D:
+            self._entities['tank']._container[0].dx += 1
+        elif symbol == key.W:
+            self._entities['tank']._container[0].dx = 0
+        elif symbol == key.SPACE:
+            if self._entities['tank']._container[0].timeout == 0:
+                self._entities['bullets']._container.append(Entity(3, 
+                self._entities['tank']._container[0].x + 0,
+                self._entities['tank']._container[0].y + 0,
+                20, 0, 0, 1, 0, 0, 1))
+                self._entities['tank']._container[0].timeout = 10
+        
+
 
     def update(self, yoyo):
-        print('yolo')
+        upper = 5
+        def rotate(item):
+            item.yr = wrap180(item.yr + item.dyr)
+            #print(item.dyr)
+
+            check1 = random.random()
+            check2 = random.randint(-upper, upper)
+
+            if item.dyr == 0:
+                item.dyr = check2
+            elif item.dyr > 0:
+                if check1 < 0.01:
+                    item.dyr = check2
+                else:
+                    item.dyr = check2/2+upper/2
+            else:
+                if check1 < 0.01:
+                    item.dyr = check2
+                else:
+                    item.dyr = check2/2-upper/2
+            pass
+
+        for item1 in self._entities:
+            for item2 in self._entities[item1]._container:
+                item2.iterate()
+        for item in self._entities['hearts']._container:
+            rotate(item)
+        if len(self._entities['bullets']._container) > 0:
+            while True:
+                for iterator in range(len(self._entities['bullets']._container)):
+                    if self._entities['bullets']._container[iterator].z > 75:
+                        del self._entities['bullets']._container[iterator]
+                        break
+                else:
+                    break
+        self._entities['tank']._container[0].timeout = contain(self._entities['tank']._container[0].timeout - 1, 100, 0)
+        if self._entities['tank']._container[0].x != contain(self._entities['tank']._container[0].x, 50, -50):
+            self._entities['tank']._container[0].x = contain(self._entities['tank']._container[0].x, 50, -50)
+            self._entities['tank']._container[0].dx = 0
 
     def on_draw(self):
         global arm
         # Clear the current GL Window
         self.clear()
 
-        for iterator1 in range(self._objects[1]):
-            glLoadIdentity()
-            glTranslatef(self._cameraInfo['offset']['x'],
-                         self._cameraInfo['offset']['y'],
-                         self._cameraInfo['offset']['z'] - 650*self._cameraInfo['XYZscaler'])
-            glRotatef(self._cameraInfo['rotation']['x'], 1, 0, 0)
-            glRotatef(self._cameraInfo['rotation']['y'], 0, 1, 0)
-            glRotatef(self._cameraInfo['rotation']['z'], 0, 0, 1)
-            glTranslatef(self._objects[3][iterator1]['Trans']['x']*self._cameraInfo['XYZscaler'],
-                         self._objects[3][iterator1]['Trans']['y']*self._cameraInfo['XYZscaler'],
-                         self._objects[3][iterator1]['Trans']['z']*self._cameraInfo['XYZscaler'])
-            glRotatef(self._objects[3][iterator1]['Rot']['x'], 1, 0, 0)
-            glRotatef(self._objects[3][iterator1]['Rot']['y'], 0, 1, 0)
-            glRotatef(self._objects[3][iterator1]['Rot']['z'], 0, 0, 1)
-
-            # Draw the Thing
-            glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE)
-            glEnable(GL_COLOR_MATERIAL)
-            glColor3f(self._objects[0][iterator1][1][0],
-                      self._objects[0][iterator1][1][1],
-                      self._objects[0][iterator1][1][2])
-            self._objects[0][iterator1][0].draw()
-            glDisable(GL_COLOR_MATERIAL)
-
-        for iterator1 in range(len(self._windowConstants[4][0])):
-            for iterator2 in [False, True]:
+        for item1 in self._entities:
+            #print(item1)
+            for item2 in self._entities[item1]._container:
                 glLoadIdentity()
-                scaler = 0.5
-                if iterator2:
-                    scaler = ((self._armVARS[arm['id']][self._controlState[11][self._windowConstants[4][0][iterator1]][6]]
-                               - self._controlState[11][self._windowConstants[4][0][iterator1]][4])
-                              / self._controlState[11][self._windowConstants[4][0][iterator1]][5]
-                              + self._controlState[11][self._windowConstants[4][0][iterator1]][7])
-                if scaler > 1:
-                    scaler -= 1
-                self._windowConstants[4][2][iterator1][0] = ((self._controlState[11][self._windowConstants[4][0][iterator1]][0]
-                                                   * self._windowConstants[2])
-                                                  + (self._controlState[11][self._windowConstants[4][0][iterator1]][2]
-                                                     * self._windowConstants[2]
-                                                     * scaler))
-                self._windowConstants[4][2][iterator1][1] = ((self._controlState[11][self._windowConstants[4][0][iterator1]][1]
-                                                   * self._windowConstants[2])
-                                                  + (self._controlState[11][self._windowConstants[4][0][iterator1]][3]
-                                                     * self._windowConstants[2]
-                                                     * scaler))
-                if iterator2:
-                    glTranslatef(self._windowConstants[4][2][iterator1][0],
-                                 self._windowConstants[4][2][iterator1][1],
-                                 self._windowConstants[1])
-                    glEnable(GL_COLOR_MATERIAL)
-                    glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE)
-                    glEnable(GL_BLEND)
-                    glColor4f(.6,.6,.6,.5)
-                    self._windowConstants[4][1].draw()
-                    glDisable(GL_BLEND)
-                else:
-                    glTranslatef(self._windowConstants[4][2][iterator1][0] * self._cameraInfo['XYZscaler'],
-                                 self._windowConstants[4][2][iterator1][1] * self._cameraInfo['XYZscaler'],
-                                 self._windowConstants[1] * self._cameraInfo['XYZscaler'])
-                    glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE)
-                    glEnable(GL_COLOR_MATERIAL)
-                    glColor3f(1,1,1)
-                    self.thing[iterator1].draw()
+                glTranslatef(self._cameraInfo['offset']['x'],
+                            self._cameraInfo['offset']['y'],
+                            self._cameraInfo['offset']['z'] - 650*self._cameraInfo['XYZscaler'])
+                glRotatef(self._cameraInfo['rotation']['x'], 1, 0, 0)
+                glRotatef(self._cameraInfo['rotation']['y'], 0, 1, 0)
+                glRotatef(self._cameraInfo['rotation']['z'], 0, 0, 1)
+                glTranslatef((item2.x+self._objects[3][item2._stlID]['Trans']['x'])*self._cameraInfo['XYZscaler'],
+                            (item2.y+self._objects[3][item2._stlID]['Trans']['y'])*self._cameraInfo['XYZscaler'],
+                            (item2.z+self._objects[3][item2._stlID]['Trans']['z'])*self._cameraInfo['XYZscaler'])
+                glRotatef(wrap180(self._objects[3][item2._stlID]['Rot']['x']+item2.xr), 1, 0, 0)
+                glRotatef(wrap180(self._objects[3][item2._stlID]['Rot']['y']+item2.yr), 0, 1, 0)
+                glRotatef(wrap180(self._objects[3][item2._stlID]['Rot']['z']+item2.zr), 0, 0, 1)
+
+                # Draw the Thing
+                glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE)
+                glEnable(GL_COLOR_MATERIAL)
+                glColor3f(self._objects[0][item2._stlID][1][0],
+                        self._objects[0][item2._stlID][1][1],
+                        self._objects[0][item2._stlID][1][2])
+                self._objects[0][item2._stlID][0].draw()
                 glDisable(GL_COLOR_MATERIAL)
+
+        '''draw the text overlays'''
+        glLoadIdentity()
+        glTranslatef(0, 250, self._textOverlay['zoom'])
+        glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE)
+        glEnable(GL_COLOR_MATERIAL)
+        glColor3f(1,1,1)
+        self._textOverlay['score'].draw()
+        glDisable(GL_COLOR_MATERIAL)
+        glLoadIdentity()
+        glTranslatef(0, -250, self._textOverlay['zoom'])
+        glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE)
+        glEnable(GL_COLOR_MATERIAL)
+        glColor3f(1,1,1)
+        self._textOverlay['lives'].draw()
+        glDisable(GL_COLOR_MATERIAL)
 
     def on_text_motion(self, motion, BLAH = False, Setting = None):
         pass
 
 def Main():
-    global arm
-    comObj = ComQuery()
-    print(comObj)
-    try:
-        arm['coms'][arm['id']] = str(comObj.device)
-    except:
-        pass
     import pyglet
-    global ORION5
-    ORION5 = Window(WINDOW[0], WINDOW[1], 'Gaming Template')
+    GAMINGTEMPLATE = Window(WINDOW[0], WINDOW[1], 'Gaming Template')
     icon1 = pyglet.image.load('./obj/logo_512x512.png')
-    ORION5.set_icon(icon1)
-    ORION5.set_location(50,50)
+    GAMINGTEMPLATE.set_icon(icon1)
+    GAMINGTEMPLATE.set_location(50,50)
     pyglet.app.run()
 
 if __name__ == '__main__':
     Main()
-
-for item in arm['arms']:
-    item['arm'].exit()
